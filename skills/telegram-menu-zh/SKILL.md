@@ -1,24 +1,17 @@
 ---
-name: menu-zh
-description: "Telegram 菜单汉化：/menu_zh 一键检查未翻译命令 → 补全中文 → 设置语言偏好。无语言切换，纯汉化。"
-version: 5.0.0
-author: kikia
-license: MIT
-metadata:
-  hermes:
-    tags: [telegram, menu, localization, i18n, zh]
-    related_skills: [hermes-agent]
+name: telegram-menu-zh
+description: "Telegram 菜单汉化：/telegram-menu-zh 一键检查未翻译命令 → 补全中文 → 设置语言偏好。无语言切换，纯汉化。"
 ---
 
 # Menu Zh — Telegram 命令菜单汉化
 
-发送 `/menu_zh`，Agent 自动完成 Telegram 菜单汉化：扫描未翻译命令 → 生成中文翻译 → 写回 JSON → 设置语言偏好。
+发送 `/telegram-menu-zh`，Agent 自动完成 Telegram 菜单汉化：扫描未翻译命令 → 生成中文翻译 → 写回 JSON → 设置语言偏好。
 
 **本 skill 是纯汉化工具**，不提供英文回退或语言切换功能。
 
 ## 触发条件
 
-- 用户发送 `/menu_zh`
+- 用户发送 `/telegram-menu-zh`
 - 用户说「更新菜单翻译」「检查菜单翻译」「补全菜单中文」
 - 用户安装了新 skill 后，要求检查翻译
 
