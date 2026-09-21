@@ -1,195 +1,194 @@
 ---
 name: mac-permission-popup
-description: 设置 macOS 原生弹窗拦截 Claude Code 权限请求。当 Claude 需要授权时（如 rm、sudo 等危险操作），弹出 macOS 对话框显示请求详情和选项，用户点击后决定自动联动到 Claude Code 继续执行。
+description: 在 macOS 上部署 Claude Code 权限拦截弹窗。当 Claude 请求授权（如 rm、sudo 等危险操作）且用户不在终端前台时，弹出 macOS 原生对话框显示请求详情，用户点选 拒绝/允许一次/会话允许 后决定自动联动回 Claude Code。支持 setup / status / uninstall。
 ---
 
-# Skill: mac-permission-popup
-**Description:** 部署 macOS 原生授权弹窗系统。拦截 Claude Code 的 PermissionRequest 事件，通过 osascript 弹出交互对话框（拒绝/允许一次/会话允许），用户点击后 decision 自动联动到 Claude Code 权限系统。
+# macOS 权限弹窗 — Claude Code PermissionRequest Hook
 
-**Input Parameters:**
-- `action` (string, optional, default: `"setup"`): 操作模式。`setup` = 完整部署, `status` = 检查当前状态, `uninstall` = 移除弹窗系统
-- `terminal_apps` (string, optional): 额外需要识别为终端应用的 app 名称列表（逗号分隔），在这些 app 前台时不弹窗，走内置权限流程
+**作用**：拦截 Claude Code 的 `PermissionRequest` 事件。当用户不在终端前台时，用
+`osascript` 弹出 macOS 原生对话框展示权限请求；用户点选后，决策通过 hook 输出
+JSON 自动联动回 Claude Code 的权限系统。
 
-**Outputs:**
-- `status` (object): 部署状态
-  - `script_deployed` (boolean): 脚本是否已部署
-  - `hook_configured` (boolean): hook 是否已配置
-  - `script_path` (string): 脚本路径
-- `guide` (string): 后续操作指引
-
----
-
-## 平台说明
-
-本 skill 仅支持 macOS。利用 `osascript display dialog` 实现原生弹窗。
+**平台**：仅 macOS（依赖 `osascript`）。
+**输入参数**：无。部署/卸载/检查分别对应下面三种操作模式。
 
 | 项目 | 值 |
 |------|-----|
 | 脚本路径 | `~/.claude/hooks/permission-alert.sh` |
 | Hook 事件 | `PermissionRequest` |
 | 配置文件 | `~/.claude/settings.json` |
-| 弹窗超时 | 60 秒（超时后走内置权限提示流程） |
+| 弹窗超时 | 60 秒（超时=不输出 JSON，回落内置提示流程） |
 
 ---
 
 ## 工作原理
 
 ```
-Claude 需要权限 (如 Bash rm)
-       │
-       ▼
-PermissionRequest hook 触发
-       │
-       ▼
-permission-alert.sh 执行
-       │
-       ├─ 用户在终端前台 → 退出码 0，走 Claude Code 内置权限提示
-       │
-       └─ 用户不在终端   → osascript 弹出原生对话框
-                              │
-                              ├─ 拒绝     → deny
+Claude 请求权限（如 Bash rm）
+        │
+        ▼
+PermissionRequest hook 触发 → permission-alert.sh
+        │
+        ├─ 前台是终端 App → 直接 exit 0，走 Claude Code 内置提示
+        │
+        └─ 前台非终端    → osascript 弹原生对话框
+                              ├─ 拒绝     → deny（拒绝并回传原因）
                               ├─ 允许一次  → allow
                               └─ 会话允许  → alwaysAllow
 ```
 
 ---
 
-## 部署步骤
+## 操作模式
 
-### Step 1: 检查前置条件
+### mode = setup（默认）— 部署
 
-确认 macOS 支持 osascript：
+#### Step 1: 前置检查
 
 ```bash
-osascript -e 'display dialog "测试" buttons {"OK"} default button "OK" giving up after 3' 2>/dev/null && echo "osascript OK" || echo "osascript 不可用"
+[ "$(uname)" = "Darwin" ] || { echo "仅支持 macOS"; exit 1; }
+osascript -e 'display dialog "测试" buttons {"OK"} default button "OK" giving up after 2' >/dev/null 2>&1 \
+  && echo "osascript OK" || echo "osascript 不可用（检查终端是否被授予自动化权限）"
 ```
 
-### Step 2: 部署脚本
+#### Step 2: 写入脚本
 
-创建 `~/.claude/hooks/permission-alert.sh`（若已存在则跳过，可用 `action=force` 覆盖）。
+将下方[脚本内容](#脚本内容)写入 `~/.claude/hooks/permission-alert.sh`，然后 `chmod +x`：
 
 ```bash
 mkdir -p ~/.claude/hooks
+# （用文件写入工具把脚本内容写到 ~/.claude/hooks/permission-alert.sh）
 chmod +x ~/.claude/hooks/permission-alert.sh
 ```
 
-### Step 3: 配置 Hook
+> 若脚本已存在：默认**不覆盖**；如需覆盖，先备份为 `.bak`，避免丢失用户自定义。
 
-在 `~/.claude/settings.json` 中添加 `hooks.PermissionRequest` 配置。
+#### Step 3: 合并 hook 配置
 
-读取现有 settings.json，在 `"hooks"` 键下添加/合并：
+读取 `~/.claude/settings.json`，在 `hooks.PermissionRequest` 下**追加**（不覆盖已有条目）：
 
 ```json
-"hooks": {
-  "PermissionRequest": [
-    {
-      "matcher": "",
-      "hooks": [
-        {
-          "type": "command",
-          "command": "bash ~/.claude/hooks/permission-alert.sh"
-        }
-      ]
-    }
-  ]
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "bash ~/.claude/hooks/permission-alert.sh" }
+        ]
+      }
+    ]
+  }
 }
 ```
 
-若 settings.json 中已有 `hooks.PermissionRequest` 且包含该命令，则跳过。
+**必须用 Python 读写 JSON，不要手写文本**（settings.json 可能已有内容，且注释/转义易错）：
 
-### Step 4: 验证部署
+```python
+import json, os
+p = os.path.expanduser("~/.claude/settings.json")
+try:
+    with open(p) as f: s = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    s = {}
+hooks = s.setdefault("hooks", {})
+entries = hooks.setdefault("PermissionRequest", [])
+cmd = "bash ~/.claude/hooks/permission-alert.sh"
+if not any(h.get("command") == cmd
+           for e in entries for h in e.get("hooks", [])):
+    entries.append({"matcher": "*",
+                    "hooks": [{"type": "command", "command": cmd}]})
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w") as f: json.dump(s, f, indent=2, ensure_ascii=False)
+    print("已写入 hook 配置")
+else:
+    print("hook 已存在，跳过")
+```
+
+> 首次注册 hook 时，Claude Code 可能弹出**终端授权提示**，需手动允许一次。
+
+#### Step 4: 验证
 
 ```bash
-# 检查脚本存在且可执行
-ls -la ~/.claude/hooks/permission-alert.sh
-
-# 检查 hook 配置
-python3 -c "
-import json
-with open('$HOME/.claude/settings.json') as f:
-    s = json.load(f)
-hooks = s.get('hooks', {})
-pr = hooks.get('PermissionRequest', [])
-print('PermissionRequest hook:', '已配置' if pr else '未配置')
-for entry in pr:
-    for h in entry.get('hooks', []):
-        print(f'  command: {h.get(\"command\", \"?\")}')
-"
+ls -l ~/.claude/hooks/permission-alert.sh
+python3 - <<'EOF'
+import json, os
+s = json.load(open(os.path.expanduser("~/.claude/settings.json")))
+pr = s.get("hooks", {}).get("PermissionRequest", [])
+print("PermissionRequest hook:", "已配置" if pr else "未配置")
+for e in pr:
+    for h in e.get("hooks", []):
+        print("  command:", h.get("command", "?"))
+EOF
 ```
 
 ---
 
-## 移除
+### mode = status — 检查
 
-设置 `action=uninstall` 时：
-1. 从 settings.json 中移除 `hooks.PermissionRequest` 配置
-2. 可选择保留或删除 `~/.claude/hooks/permission-alert.sh`
+```bash
+ls -l ~/.claude/hooks/permission-alert.sh 2>/dev/null || echo "脚本未部署"
+python3 -c "import json,os; s=json.load(open(os.path.expanduser('~/.claude/settings.json'))); print('hook 已配置' if s.get('hooks',{}).get('PermissionRequest') else 'hook 未配置')"
+```
+
+---
+
+### mode = uninstall — 卸载
+
+1. 用 Python 从 `settings.json` 中移除 `hooks.PermissionRequest` 里 command 匹配 `permission-alert.sh` 的条目（若数组清空则删除该键）。
+2. 询问用户是否删除脚本文件 `~/.claude/hooks/permission-alert.sh`。
 
 ---
 
 ## 脚本内容
 
-以下是 `permission-alert.sh` 完整内容（部署时写入 `~/.claude/hooks/permission-alert.sh`）：
+完整写入 `~/.claude/hooks/permission-alert.sh`：
 
 ```bash
 #!/bin/bash
-# PermissionRequest hook - 当用户不在终端时，弹出可交互的 macOS 授权对话框
-# decision 直接联动到 Claude Code 的权限系统
-set -euo pipefail
+# PermissionRequest hook — 用户不在终端前台时，弹出交互式 macOS 授权对话框
+# 决策直接联动回 Claude Code 权限系统
+set -uo pipefail
 
 request=$(cat)
 
-# 提取关键信息
-tool_name=$(echo "$request" | python3 -c "
+# 解析字段：写入临时 JSON 再逐个取值，避免命令含空格被 read 拆错
+tmp=$(mktemp)
+printf '%s' "$request" | python3 -c '
 import sys, json
-d = json.load(sys.stdin)
-print(d.get('tool_name', '未知工具'))
-" 2>/dev/null || echo "未知工具")
-
-message=$(echo "$request" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-print(d.get('message', ''))
-" 2>/dev/null || echo "")
-
-tool_input=$(echo "$request" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-ti = d.get('tool_input', {})
-if 'command' in ti:
-    print(ti['command'])
-elif 'file_path' in ti:
-    print(ti['file_path'])
-elif 'description' in ti:
-    print(ti['description'])
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = {}
+tn = (d.get("tool_name") or "未知工具").replace("\n", " ")
+ti = d.get("tool_input") or {}
+if isinstance(ti, dict):
+    v = ti.get("command") or ti.get("file_path") or ti.get("description") or json.dumps(ti, ensure_ascii=False)
 else:
-    print(json.dumps(ti, ensure_ascii=False))
-" 2>/dev/null || echo "")
+    v = str(ti)
+msg = (d.get("reason") or d.get("message") or "").replace("\n", " ")
+json.dump({"tool_name": tn, "tool_input": str(v), "message": msg},
+          open(sys.argv[1], "w"), ensure_ascii=False)
+' "$tmp" 2>/dev/null
 
-# 检测当前前台 app（优先用 osascript，失败则回退到 AppKit——无需 Accessibility 权限）
+tool_name=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["tool_name"])' "$tmp" 2>/dev/null || echo "未知工具")
+tool_input=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["tool_input"])' "$tmp" 2>/dev/null || echo "")
+message=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["message"])' "$tmp" 2>/dev/null || echo "")
+rm -f "$tmp"
+
+# 检测前台 App（osascript 优先，回退 AppKit — 无需辅助功能权限）
 front_app=$(osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true' 2>/dev/null || true)
 if [[ -z "$front_app" ]]; then
-  front_app=$(python3 -c "from AppKit import NSWorkspace; print(NSWorkspace.sharedWorkspace().frontmostApplication().localizedName())" 2>/dev/null || true)
+  front_app=$(python3 -c 'from AppKit import NSWorkspace; print(NSWorkspace.sharedWorkspace().frontmostApplication().localizedName())' 2>/dev/null || true)
 fi
 
-# 在这些终端应用中不弹窗，走内置权限流程
+# 前台是终端应用时不弹窗，走内置权限流程
 terminal_apps="Terminal iTerm2 Warp kitty Alacritty WezTerm Ghostty Hyper Tabby"
-
-is_terminal=false
 for app in $terminal_apps; do
-  if [[ "$front_app" == "$app" ]]; then
-    is_terminal=true
-    break
-  fi
+  [[ "$front_app" == "$app" ]] && exit 0
 done
 
-if [[ "$is_terminal" == "true" ]]; then
-  exit 0
-fi
-
-# 构建对话框内容
-dialog_title="Claude Code 授权请求"
-
+# 组装对话框文案
 if [[ -n "$message" ]]; then
   dialog_text="$message"
 elif [[ -n "$tool_input" ]]; then
@@ -198,67 +197,48 @@ else
   dialog_text="Claude Code 请求使用工具: $tool_name"
 fi
 
-# 弹出交互对话框
-result=$(osascript \
-  -e "set theDialog to \"$dialog_text\"" \
-  -e "display dialog theDialog with title \"$dialog_title\" buttons {\"拒绝\", \"允许一次\", \"会话允许\"} default button \"允许一次\" cancel button \"拒绝\" with icon caution giving up after 60" 2>&1)
+# 转义双引号和反斜杠，防止 AppleScript 注入/语法错误
+esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+safe_text=$(esc "$dialog_text")
+safe_title=$(esc "Claude Code 授权请求")
 
-# 注意：检测顺序很重要 — "会话允许" 包含 "允许" 子串，先检测更具体的
-if [[ "$result" == *"会话允许"* ]]; then
-  cat <<'DECISION'
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PermissionRequest",
-    "decision": {
-      "behavior": "alwaysAllow"
-    }
-  }
-}
-DECISION
-elif [[ "$result" == *"允许一次"* ]]; then
-  cat <<'DECISION'
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PermissionRequest",
-    "decision": {
-      "behavior": "allow"
-    }
-  }
-}
-DECISION
-elif [[ "$result" == *"拒绝"* ]]; then
-  cat <<'DECISION'
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PermissionRequest",
-    "decision": {
-      "behavior": "deny",
-      "message": "用户通过对话框拒绝了此操作"
-    }
-  }
-}
-DECISION
-else
-  # 超时或关闭对话框 → 不输出 JSON，走正常权限提示流程
-  exit 0
+result=$(osascript \
+  -e "display dialog \"$safe_text\" with title \"$safe_title\" buttons {\"拒绝\", \"允许一次\", \"会话允许\"} default button \"允许一次\" cancel button \"拒绝\" with icon caution giving up after 60" 2>&1)
+
+# 超时检测：AppleScript 超时会返回 "... gave up:true"，此时不应视为用户选择
+if [[ "$result" == *"gave up:true"* ]]; then
+  exit 0   # 超时 → 走正常权限提示流程
 fi
+
+# 顺序重要：「会话允许」含「允许」子串，须先判断更具体的
+if [[ "$result" == *"会话允许"* ]]; then
+  behavior="alwaysAllow"
+elif [[ "$result" == *"允许一次"* ]]; then
+  behavior="allow"
+elif [[ "$result" == *"拒绝"* ]]; then
+  behavior="deny"
+else
+  exit 0   # 超时/关闭 → 不输出 JSON，走正常流程
+fi
+
+python3 -c '
+import json, sys
+b = sys.argv[1]
+out = {"hookSpecificOutput": {"hookEventName": "PermissionRequest",
+       "decision": {"behavior": b}}}
+if b == "deny":
+    out["hookSpecificOutput"]["decision"]["message"] = "用户通过对话框拒绝了此操作"
+print(json.dumps(out, ensure_ascii=False))
+' "$behavior"
 ```
 
 ---
 
 ## 自定义
 
-### 添加更多终端应用
-
-修改脚本中的 `terminal_apps` 变量，或通过 skill 参数 `terminal_apps` 传入额外的 app 名称。
-
-### 修改弹窗超时
-
-修改脚本中 `giving up after 60` 的数字（秒）。
-
-### 修改按钮文本
-
-修改 `osascript` 的 `buttons` 参数，同时更新对应的检测逻辑。
+- **增加终端 App**：修改脚本中 `terminal_apps` 变量。
+- **修改超时**：改 `giving up after 60` 的秒数。
+- **修改按钮**：改 `buttons {...}`，**同时**更新下方对应的 `if/elif` 判断分支。
 
 ---
 
@@ -266,8 +246,17 @@ fi
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| 弹窗不出现 | 用户在终端前台 | 切换到非终端 app（浏览器、编辑器等）再触发 |
-| 弹窗出现但点击无效 | osascript 权限不足 | 系统设置 → 隐私与安全性 → 辅助功能，确保终端有权限 |
-| hook 配置不生效 | JSON 格式错误 | `python3 -c "import json; json.load(open('$HOME/.claude/settings.json'))"` 检查 |
-| 脚本权限错误 | 不可执行 | `chmod +x ~/.claude/hooks/permission-alert.sh` |
-| 对话框乱码 | 特殊字符未转义 | 检查 `dialog_text` 中是否有未转义的双引号 |
+| 弹窗不出现 | 用户正在终端前台 | 切到浏览器/编辑器等非终端 App 再触发 |
+| 弹窗中文乱码 | dialog 文本未转义 | 脚本已内置 `esc` 转义；检查是否有其他未转义字符 |
+| 点击无效 | 终端缺自动化权限 | 系统设置 → 隐私与安全性 → 自动化/辅助功能，勾选终端 |
+| hook 不生效 | settings.json JSON 语法错误 | `python3 -c "import json;json.load(open('$HOME/.claude/settings.json'))"` |
+| 脚本不执行 | 无执行权限 | `chmod +x ~/.claude/hooks/permission-alert.sh` |
+| hook 事件名报错 | 使用了旧事件名 | 确认事件为 `PermissionRequest`（非 `PreToolUse`） |
+
+## Verification Checklist
+
+- [ ] `uname` 为 `Darwin`（仅 macOS）
+- [ ] 脚本已写入且可执行
+- [ ] `settings.json` 中 `hooks.PermissionRequest` 含 `permission-alert.sh` 命令
+- [ ] `settings.json` 是合法 JSON
+- [ ] 非终端前台触发时能看到中文对话框

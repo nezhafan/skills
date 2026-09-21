@@ -1,80 +1,81 @@
 ---
 name: skill-list
-description: Use when the user asks "what skills are installed", "list skills", "show me all skills", "/skills", "/skill_list", or wants to see locally installed agent skills. Lists all installed skills grouped by category with Chinese descriptions.
+description: Use when the user asks "what skills are installed", "list skills", "show me all skills", "/skills", "/skill_list", or wants to see locally installed agent skills grouped by category with Chinese descriptions. Lists locally installed agent skills.
 ---
 
 # Skill List — 本机已安装 Skill 列表
 
-列出本机所有已安装的 Agent skills，展示中文描述。
+列出本机所有已安装的 Agent skills，按分类分组，展示中文描述。
 
 ## When to Use
 
-- 用户问 "有哪些 skill" / "列出所有 skill" / "show skills"
+- 用户问「有哪些 skill」/「列出所有 skill」/「show skills」
 - 用户发 `/skill_list`
 - 用户想了解本机已安装了什么能力
 
 **Don't use for:**
 - 搜索/发现网络上的新 skill
-- 用户想看某个 skill 详情 → 直接 `Read` 对应的 SKILL.md
+- 查看某个 skill 详情 → 直接用文件读取工具打开对应 SKILL.md
 
 ## 操作步骤
 
-### Step 1: 从上下文识别当前智能体
+### Step 1: 定位当前 Agent 的 skills 目录
 
-查看你自己的系统上下文（Environment 部分、system prompt 等），匹配以下关键字来识别当前运行在哪个智能体中：
+从自身运行上下文（system prompt / environment 特征）判断当前 Agent，取其 skills 根目录：
 
-| 上下文特征 | 智能体 | skills 路径 |
-|-----------|--------|-------------|
-| `Claude Code`, `claude-code`, `CLAUDECODE` | Claude Code | `~/.claude/skills` |
-| `Codex`, `codex` | Codex | `~/.codex/skills` |
-| `Hermes`, `hermes` | Hermes | `~/.hermes/skills` |
-| `OpenClaw`, `openclaw` | OpenClaw | `~/.openclaw/skills` |
+- Hermes → `~/.hermes/skills`
+- Claude Code → `~/.claude/skills`
+- Codex → `~/.codex/skills`
+- OpenClaw → `~/.openclaw/skills`
 
-### Step 2: 提取所有 SKILL.md 的 description
+判断依据是**上下文里出现的标识字符串**（如 `Hermes`/`hermes`、`Claude Code`/`CLAUDECODE`、`Codex`/`codex`），不是目录是否存在——用户可能同时装了多个 Agent。
 
-确定 skills 路径后，用**一次** bash 调用提取：
+### Step 2: 一次性提取所有 SKILL.md 的 frontmatter
 
 ```bash
-find <SKILLS_DIR> -maxdepth 2 -name "SKILL.md" -exec grep -H "^\(name\|description\):" {} \;
+find <SKILLS_DIR> -maxdepth 3 -name "SKILL.md" -exec grep -H "^\(name\|description\):" {} \;
 ```
 
-如果路径不存在，向用户报告：「检测到当前智能体为 XXX，但 skills 目录 XXX 不存在，请确认。」
+**关键：必须用 `-maxdepth 3`，不能用 `-maxdepth 2`。**
+skills 常按分类分目录存放（如 `skills/creative/photo-frame/SKILL.md`，深度为 3），
+用 `-maxdepth 2` 会漏掉绝大多数 skill。
 
-### Step 3: 整理并翻译
+若目录不存在或返回为空，向用户报告：「检测到当前 Agent 为 XXX，但未在 `XXX` 找到已安装的 skill，请确认路径。」
 
-解析输出，提取每个 skill 的 `name` 和 `description`，将 description 翻译为简洁中文（≤15 字）。
+### Step 3: 解析 + 翻译
 
-### Step 3: 整理并翻译
+把每条结果解析为 `name` / `description`，并为 description 生成简洁中文（≤15 字），动词开头、意译而非直译。
+按 SKILL.md 路径的首层目录名作为**分类**（顶层直接存放的 skill 归入「未分类」）。
 
-解析 Step 2 的输出，提取每个 skill 的 `name` 和 `description`，将 description 翻译为简洁中文（≤15 字）。
+### Step 4: 展示
 
-### Step 4: 展示给用户
-
-以列表形式展示，每个 skill 显示名称（加粗）和中文描述。末尾附加使用提示。
-
-**输出格式示例：**
+按分类分组输出，skill 名加粗，末尾附使用提示：
 
 ```
-📦 本机已安装 N 个 Skills（检测到 XXX 智能体）
+📦 本机已安装 N 个 Skills
 
-• brainstorming — 创意头脑风暴
-• writing-plans — 编写实现计划
-• writing-skills — 编写 Skill 文件
+【分类 A】
+• skill-a — 中文描述
+• skill-b — 中文描述
+
+【分类 B】
+• skill-c — 中文描述
 
 💡 查看详情：直接说「看看 XXX skill」即可
 ```
 
 ## Common Pitfalls
 
-1. **不要用 `skills_list()` 等专有 API** — 从上下文识别智能体 + bash 提取，通用且只需一次权限
-2. **不要遍历目录猜智能体** — 用户可能装了多个智能体，必须从上下文特征精确识别
-3. **不要展开详情** — 这只是列表，按需查看
-4. **不要搜索网络** — 只列本地已安装
-5. **不要跳过翻译** — description 要翻译成中文
+1. **`-maxdepth 2` 会漏 skill** — 真实安装目录多为 3 层，务必用 `-maxdepth 3`
+2. **不要用专有 API（如 Hermes 的 `skills_list()`）** — 从上下文识别 + bash 提取，跨 Agent 通用
+3. **不要靠遍历目录猜 Agent** — 必须从上下文字符串判断
+4. **不要展开详情** — 这是列表，详情按需读取
+5. **不要联网搜索** — 只列本地已安装
+6. **不要跳过翻译** — description 一律转成中文
 
 ## Verification Checklist
 
-- [ ] 从上下文正确识别了当前智能体
-- [ ] `find` + `grep` 成功返回结果
-- [ ] 每个 skill 展示名称 + 中文描述
+- [ ] 用 `-maxdepth 3` 提取，数量与实际安装数一致（不是只有一两条）
+- [ ] 每个 skill 展示「名称 + 中文描述」
+- [ ] 结果按分类分组
 - [ ] 末尾有使用提示
