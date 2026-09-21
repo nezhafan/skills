@@ -1,6 +1,6 @@
 ---
 name: frp-alicloud-auto-cert
-description: 家用设备（树莓派/NAS/旧笔记本/软路由等无公网IP主机）通过 frp 穿透暴露服务时，用 frp-alicloud-auto-cert 在本地为阿里云托管域名定期自动签发与续期 Let's Encrypt 证书。DNS-01 验证经阿里云 DNS 完成，不占用 80/443 端口、不依赖公网服务器；远程服务器只做流量转发，更换服务器仅需改一行 frpc 配置。适用于 frp 内网穿透 + 阿里云域名 + 自建 HTTPS 的场景。
+description: 家用设备（树莓派/NAS/旧笔记本/软路由等无公网IP主机）通过 frp 穿透暴露服务时，为托管在阿里云的域名定期自动签发与续期 Let's Encrypt 证书。方案A：本地 DNS-01 验证（经阿里云 DNS，不占 80/443、不依赖公网服务器、换服务器只改一行 frpc 配置）；方案B：SSH 密钥免密登录公网服务器远程续签并同步回本地。适用于 frp 内网穿透 + 阿里云域名 + 自建 HTTPS 的场景。
 ---
 
 # 家用设备 + frp + 阿里云域名：本地自动签发证书
@@ -283,6 +283,107 @@ ss -lntp | grep -E ':80|:443'             # 确认端口到底被谁占用
 ```
 
 先把废弃的 vhost 配置备份后删除。**注意先确认该 vhost 是否真在监听** —— 常见情况是配了 `listen 443` 但 443 实际被 frps 占着（nginx 压根没跑），那些配置是纯死配置，直接删掉即可。
+
+## 方案 B：SSH 远程续签（证书签在公网服务器上）
+
+方案 A（上面 1–8 步）用 DNS-01 在**本地**签发，是首选方案。但如果你已经在**公网服务器（frps）上**用 certbot 签过证书、只是想把「定期检查 + 同步 + 重启」自动化，可以走这条更轻量的路径：**本地脚本通过 SSH 免密登录公网机，检查证书到期情况，到期就在远端续签，再 scp 回本地，最后重启 frpc。**
+
+适用：域名已验证过、证书已存在于两侧，只想加一层自动巡检。不适用：从未签过证书的全新部署（那请用方案 A）。
+
+### B1. 前置：配置 SSH 免密（必须先手动完成）
+
+脚本依赖免密登录，**这一步必须人工做一次**，Agent 无法替用户输密码：
+
+```bash
+# 1) 生成密钥对（已存在则直接跳过，加 -N "" 表示不设密钥密码，便于脚本无人值守调用）
+ssh-keygen -t rsa -f ~/.ssh/id_rsa -N ""
+
+# 2) 把公钥推到公网服务器（会提示输入一次服务器密码）
+ssh-copy-id root@<公网服务器IP>
+
+# 3) 验证免密是否成功（不报错、直接回显 OK 即可）
+ssh -o BatchMode=yes root@<公网服务器IP> "echo OK"
+```
+
+> **不要用 `sshpass` + 明文密码文件**。密码一旦在服务器侧被改，定时任务会静默失败；明文字符串落盘本身也是安全隐患。密钥认证是唯一推荐做法。
+>
+> `-N ""` 的意义：让脚本能无人值守调用。若你更看重安全、希望密钥本身也带口令，则需配合 `ssh-agent` 使用，否则 cron 里会因等待输入口令而挂起。
+
+### B2. 续期脚本 `/root/www/scripts/cert-renew-check.sh`
+
+要点：用**数组** `SSH_OPTS` 统一携带密钥与 `BatchMode`；开头做**前置自检**（密钥存在 + 免密可用），失败即退出，避免 cron 里静默挂起；每个域名独立判断成败，最后统一汇总。
+
+```bash
+#!/bin/bash
+# 每月检查 HTTPS 证书是否本月到期，到期则重新签发并同步
+set -uo pipefail
+
+CERTS_DIR="/usr/local/frp/certs"
+SSH_KEY="/root/.ssh/id_rsa"
+FRPS_HOST="root@<公网服务器IP>"
+# BatchMode=yes 让免密失败时立即报错，而不是挂起等密码输入
+SSH_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15)
+FRPS_CERT_DIR="/etc/letsencrypt/live"
+DOMAINS=("example.com" "blog.example.com")
+THIS_MONTH=$(date +%Y-%m)
+RENEWED=0
+FAILED=0
+
+# 前置自检
+if [ ! -f "$SSH_KEY" ]; then
+    echo "[ERR] SSH 密钥不存在: $SSH_KEY"
+    echo "[ERR] 请先执行: ssh-keygen -t rsa -f $SSH_KEY -N \"\" && ssh-copy-id $FRPS_HOST"
+    exit 1
+fi
+if ! ssh "${SSH_OPTS[@]}" "$FRPS_HOST" "true" 2>/dev/null; then
+    echo "[ERR] 无法免密登录 $FRPS_HOST，请检查 ssh-copy-id 是否已完成"
+    exit 1
+fi
+
+for domain in "${DOMAINS[@]}"; do
+    cert="${CERTS_DIR}/${domain}.fullchain.pem"
+    [ -f "$cert" ] || { echo "[SKIP] $domain: 证书文件不存在"; continue; }
+
+    expiry=$(openssl x509 -enddate -noout -in "$cert" | cut -d= -f2)
+    expiry_month=$(date -d "$expiry" +%Y-%m 2>/dev/null)
+
+    if [ "$expiry_month" = "$THIS_MONTH" ]; then
+        echo "[EXPIRE] $domain: $expiry → 重新签发..."
+        # 注意：certbot 与 systemctl start 之间用 ; 而非 &&，
+        # 否则续签失败时 frps 不会被重新拉起来
+        if ! ssh "${SSH_OPTS[@]}" "$FRPS_HOST" \
+            "systemctl stop frps && certbot certonly --standalone --force-renewal -d $domain --agree-tos --non-interactive --email admin@example.com; systemctl start frps"; then
+            echo "[ERR] $domain: 远程签发失败"; FAILED=1; continue
+        fi
+        scp "${SSH_OPTS[@]}" "${FRPS_HOST}:${FRPS_CERT_DIR}/${domain}/fullchain.pem" \
+            "${CERTS_DIR}/${domain}.fullchain.pem" || { echo "[ERR] fullchain 同步失败"; FAILED=1; continue; }
+        scp "${SSH_OPTS[@]}" "${FRPS_HOST}:${FRPS_CERT_DIR}/${domain}/privkey.pem" \
+            "${CERTS_DIR}/${domain}.privkey.pem" || { echo "[ERR] privkey 同步失败"; FAILED=1; continue; }
+        echo "[OK] $domain 证书已更新"; RENEWED=1
+    else
+        echo "[OK] $domain: $expiry (本月不过期)"
+    fi
+done
+
+[ "$RENEWED" -eq 1 ] && { systemctl restart frpc; echo "[DONE] frpc 已重启"; }
+[ "$FAILED" -ne 0 ] && { echo "[DONE] 存在失败项，请手动检查！"; exit 1; }
+```
+
+挂进定时任务（每月 10 号凌晨 3 点）：
+
+```bash
+cronjob(action='create', name='HTTPS证书月度更新', schedule='0 3 10 * *',
+        prompt='执行脚本 /root/www/scripts/cert-renew-check.sh，检查HTTPS域名证书是否本月到期，到期则通过SSH在frps服务器上续签并同步到本地，最后重启frpc。')
+```
+
+### B3. 方案 B 的坑
+
+| 问题 | 原因 | 解决 |
+|------|------|------|
+| 定时任务静默失败，无任何输出 | 用密码文件（`sshpass -f`）认证，服务器改密码后失效 | 改用密钥认证；脚本开头加免密自检 |
+| 脚本卡住不返回 | 免密失效后 ssh 转为交互式索要密码 | `SSH_OPTS` 里加 `-o BatchMode=yes` |
+| frps 停掉后再没起来 | 远端命令链写成 `... certbot ... && systemctl start frps`，续签失败导致 `start` 不执行 | 用 `;` 分隔，保证 frps 一定被拉起 |
+| 部分域名失败被忽略 | 循环内出错仍继续并最终报成功 | 用 `FAILED` 标志汇总，失败则 `exit 1` |
 
 ## Pitfalls 汇总
 
