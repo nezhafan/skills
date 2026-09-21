@@ -1,12 +1,6 @@
 ## Skills 列表
 
-一组可复用的 Agent skills，覆盖环境桥接、系统集成、运维自动化等场景。
-
-### 🔌 模型接入
-
-| Skill | 说明 |
-|-------|------|
-| [codex-deepseek-bridge](skills/codex-deepseek-bridge/SKILL.md) | 将 DeepSeek 模型通过 Moon Bridge 转发层接入 OpenAI Codex，本地部署与配置 |
+一组可复用的 Agent skills，覆盖系统集成、运维自动化、工具辅助等场景。
 
 ### 🖥️ 系统集成
 
